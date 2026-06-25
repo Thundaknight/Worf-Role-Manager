@@ -44,7 +44,7 @@ REMOVABLE_ROLES = ('commodore', 'first_officer', 'roe_officer', 'diplomacy_offic
 # Display order in the role roster
 ROLE_DISPLAY_ORDER = [
     ('commodore', 'Commodore'),
-    ('first_officer', '1st Officer'),
+    ('first_officer', 'First Officer'),
     ('roe_officer', 'RoE Officer'),
     ('diplomacy_officer', 'Diplomacy Officer'),
 ]
@@ -177,7 +177,7 @@ def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed
             if alliance_role:
                 holders = [m for m in role.members if alliance_role in m.roles]
             else:
-                holders = list(role.members)
+                holders = []  # can't determine alliance membership without the role
 
             if holders:
                 names = ', '.join(strip_alliance_tag(m.display_name) for m in holders)
@@ -268,8 +268,12 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
 
         guild = interaction.guild
         member = interaction.user
-        new_nick = f'[{tag}] {name}'
 
+        # Capture old tag before the nickname changes
+        old_tag = get_alliance_tag(member)
+        switching = old_tag is not None and old_tag != tag
+
+        new_nick = f'[{tag}] {name}'
         try:
             await member.edit(nick=new_nick)
         except discord.Forbidden:
@@ -278,6 +282,15 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
                 ephemeral=True,
             )
             return
+
+        # Remove old alliance role when switching tags
+        if switching:
+            old_role = discord.utils.get(guild.roles, name=old_tag)
+            if old_role and old_role in member.roles:
+                try:
+                    await member.remove_roles(old_role, reason=f'Alliance change: {old_tag} → {tag}')
+                except discord.Forbidden:
+                    logger.warning('Cannot remove old alliance role %s from %s', old_tag, member)
 
         role = discord.utils.get(guild.roles, name=tag)
         if role is None:
@@ -308,7 +321,13 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
         state = load_state()
         if tag not in state.setdefault('alliances', []):
             state['alliances'].append(tag)
-            save_state(state)
+
+        # Clear admiral registry for old alliance if this member held it
+        if switching and state.get('admirals', {}).get(old_tag) == member.id:
+            del state['admirals'][old_tag]
+            logger.info('Cleared admiral registry for %s (tag switch: %s → %s)', member, old_tag, tag)
+
+        save_state(state)
 
         if SERVER_ROLE_ID:
             server_role = guild.get_role(SERVER_ROLE_ID)
@@ -324,6 +343,13 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
             f'Done! Your nickname is now `{new_nick}` and you have been added to the **{tag}** alliance.',
             ephemeral=True,
         )
+
+        # Cleanup any alliance that just became empty, then refresh the roster
+        try:
+            await interaction.client._cleanup_empty_alliances(guild)
+            await interaction.client.update_role_list_post(guild)
+        except Exception:
+            logger.exception('Failed to update role list after alliance change')
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         logger.exception('Error in AllianceModal: %s', error)
