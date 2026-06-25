@@ -1,0 +1,17 @@
+services:
+  worf:
+    build: ./bot
+    container_name: worf
+    restart: unless-stopped
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - SELF_SERVICE_CHANNEL_ID=${SELF_SERVICE_CHANNEL_ID}
+      - ADMIN_REQUEST_CHANNEL_ID=${ADMIN_REQUEST_CHANNEL_ID}
+      - SERVER_ROLE_ID=${SERVER_ROLE_ID:-0}
+      - ADMIRAL_ROLE_NAME=${ADMIRAL_ROLE_NAME:-Admiral}
+      - COMMODORE_ROLE_NAME=${COMMODORE_ROLE_NAME:-Commodore}
+      - FIRST_OFFICER_ROLE_NAME=${FIRST_OFFICER_ROLE_NAME:-First Officer}
+      - ROE_OFFICER_ROLE_NAME=${ROE_OFFICER_ROLE_NAME:-RoE Officer}
+      - DIPLOMACY_OFFICER_ROLE_NAME=${DIPLOMACY_OFFICER_ROLE_NAME:-Diplomacy Officer}
+    volumes:
+      - ./data:/data
