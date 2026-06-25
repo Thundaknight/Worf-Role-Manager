@@ -56,14 +56,18 @@ cp .env.example .env
 |---|---|---|---|
 | `DISCORD_TOKEN` | Yes | — | Bot token from the Developer Portal |
 | `SELF_SERVICE_CHANNEL_ID` | Yes | — | Channel ID where Worf posts the self-service panel |
-| `ADMIN_REQUEST_CHANNEL_ID` | Yes | — | Channel ID where role requests appear for admin review |
+| `ADMIN_REQUEST_CHANNEL_ID` | Yes | — | Channel ID for admin role-request review; slash commands only work here |
+| `ADMIN_ROLE_ID` | Yes | — | Role ID of the admin role — tagged on every request posted to the admin channel |
+| `LEADERSHIP_CATEGORY_ID` | Yes | — | Category ID under which temporary per-alliance approval channels are created |
+| `GUILD_ID` | No | `0` | Guild ID for instant slash-command registration. Omit to sync globally (≤1 hr) |
+| `SERVER_ROLE_ID` | No | `0` | Role assigned automatically when a user completes the Alliance form |
 | `ADMIRAL_ROLE_ID` | No | `0` | Role ID of the Admiral role |
 | `COMMODORE_ROLE_ID` | No | `0` | Role ID of the Commodore role |
 | `FIRST_OFFICER_ROLE_ID` | No | `0` | Role ID of the First Officer role |
 | `ROE_OFFICER_ROLE_ID` | No | `0` | Role ID of the RoE Officer role |
 | `DIPLOMACY_OFFICER_ROLE_ID` | No | `0` | Role ID of the Diplomacy Officer role |
 
-> To find a role ID: enable Developer Mode in Discord (*User Settings → Advanced → Developer Mode*), then go to *Server Settings → Roles*, right-click a role and choose **Copy Role ID**. A value of `0` disables that request button.
+> To find an ID: enable Developer Mode (*User Settings → Advanced → Developer Mode*). Right-click a channel/category/role and choose **Copy ID**. A role value of `0` disables that request button.
 
 ---
 
@@ -105,6 +109,24 @@ docker compose up -d --build
 
 ---
 
+## Slash Commands
+
+All slash commands are restricted to the `ADMIN_REQUEST_CHANNEL_ID` channel.
+
+| Command | Description |
+|---|---|
+| `/addalliance <tag>` | Register an alliance tag that existed before Worf started. The role named `TAG` must already exist on the server. |
+| `/addadmiral <tag> <user>` | Register a pre-existing admiral for an alliance. The user must already hold the Admiral role. |
+| `/listadmirals` | Display the current admiral roster (tag → member). |
+
+**First-time setup order:**
+1. `/addalliance TREK` — register the alliance
+2. `/addadmiral TREK @Username` — assign the admiral
+
+After this, any Commodore/First Officer/RoE Officer/Diplomacy Officer request from a `[TREK]` member will create a private channel for that alliance's admiral to approve, rather than posting to the admin channel.
+
+---
+
 ## How It Works
 
 ### Self-Service Panel
@@ -125,19 +147,26 @@ On startup Worf looks for a stored message ID in `data/bot_state.json`. If found
 3. Worf renames the user to `[TAG] In-Game Name`.
 4. Worf checks whether a role named `TAG` exists. If not, it creates one. Either way, the role is assigned to the user.
 
-### Role Requests
+### Role Requests — Admiral
 
-1. User clicks a role button → they receive an ephemeral message: *"Your request … is under review."*
-2. An embed is posted in the admin channel with **Approve** / **Deny** buttons.
-3. An admin clicks **Approve**:
-   - Worf assigns the role to the user.
-   - A confirmation message is posted in the admin channel.
-   - The approve/deny buttons are disabled on the original request card.
-4. An admin clicks **Deny**:
-   - A denial message is posted in the admin channel.
-   - The buttons are disabled.
+1. User clicks **Request Admiral Access** → ephemeral confirmation sent to user.
+2. An embed is posted in the admin channel, tagging `ADMIN_ROLE_ID`.
+3. Admin clicks **Approve** → role assigned, confirmation posted, buttons disabled.
+4. Admin clicks **Deny** → denial posted, buttons disabled.
+5. On approval, Worf records `{alliance_tag: user_id}` in the admiral roster (extracted from the user's `[TAG] Name` nickname).
 
-Approval buttons survive bot restarts — Worf handles them via the interaction's `custom_id` rather than in-memory view state.
+### Role Requests — Commodore / First Officer / RoE Officer / Diplomacy Officer
+
+1. User clicks a role button → Worf reads their alliance tag from their nickname (`[TAG]` prefix) or their alliance role.
+2. **If an admiral is registered for that alliance:**
+   - Worf creates a private text channel under `LEADERSHIP_CATEGORY_ID`.
+   - Channel is visible only to that specific admiral member and the admin role (not the whole Admiral role).
+   - Both are tagged in the message. The user receives an ephemeral message: *"sent to your alliance admiral for review."*
+   - After Approve/Deny, a confirmation is posted and the channel is deleted after 10 seconds.
+3. **If no admiral is registered** (or no alliance tag found, or category not configured):
+   - Falls back to the admin channel, tagging `ADMIN_ROLE_ID` with a note explaining why.
+
+Approval buttons survive bot restarts — they encode the user ID and role ID in the `custom_id` rather than relying on in-memory view state.
 
 ---
 
@@ -145,7 +174,10 @@ Approval buttons survive bot restarts — Worf handles them via the interaction'
 
 | Symptom | Fix |
 |---|---|
-| *"I do not have permission to update your nickname"* | Move Worf's role above members' roles. Worf cannot rename users whose top role is equal to or above its own. |
+| *"I do not have permission to update your nickname"* | Move Worf's role above members' roles in *Server Settings → Roles*. |
 | *"I do not have permission to assign …"* | Move Worf's role above the target role in the server hierarchy. |
+| Slash commands not appearing | Set `GUILD_ID` for instant registration, or wait up to 1 hour for global sync. |
+| Leadership channel not created | Verify `LEADERSHIP_CATEGORY_ID` is a category (not a channel) and Worf has *Manage Channels* permission. |
+| Sub-role requests going to admin channel unexpectedly | Run `/listadmirals` to confirm the admiral is registered; check the user's nickname starts with `[TAG]`. |
 | Worf posts a new panel on every restart | Ensure `./data` is a persistent bind mount (check `docker-compose.yml` volumes). |
-| Buttons stop working after restart | This should not happen — buttons use persistent `custom_id` routing. If it does, check logs with `docker compose logs -f worf`. |
+| Buttons stop working after restart | Buttons use persistent `custom_id` routing — check logs with `docker compose logs -f worf`. |
