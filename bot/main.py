@@ -1,7 +1,7 @@
 import asyncio
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
 import json
 import re
@@ -164,6 +164,11 @@ def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed
         admiral_member = guild.get_member(admiral_id) if admiral_id else None
         admiral_name = strip_alliance_tag(admiral_member.display_name) if admiral_member else '*(vacant)*'
 
+        # No admiral registered — show stub entry only
+        if not admiral_member:
+            embed.add_field(name=f'[{tag}]', value=f'**Admiral:** {admiral_name}', inline=False)
+            continue
+
         lines = [f'**Admiral:** {admiral_name}']
 
         for role_key, label in ROLE_DISPLAY_ORDER:
@@ -186,7 +191,6 @@ def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed
 
             lines.append(f'**{label}:** {names}')
 
-        now_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         embed.add_field(name=f'[{tag}]', value='\n'.join(lines), inline=False)
 
     embed.set_footer(text=f'Last updated: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}')
@@ -503,6 +507,7 @@ class RemovePlayerModal(discord.ui.Modal, title='Remove Player from Alliance'):
             )
             logger.info('%s removed %s from alliance %s', interaction.user, target, target_tag)
             try:
+                await interaction.client._cleanup_empty_alliances(guild)
                 await interaction.client.update_role_list_post(guild)
             except Exception:
                 logger.exception('Failed to update role list after player removal')
@@ -773,6 +778,76 @@ class WorfBot(commands.Bot):
         save_state(state)
         logger.info('Role list post created (message ID: %s)', msg.id)
 
+    # ── Alliance cleanup ────────────────────────────────────────────────────
+
+    async def _cleanup_empty_alliances(self, guild: discord.Guild) -> bool:
+        """
+        Remove any registered alliance whose role has zero members.
+        Deletes the Discord role and removes the entry from state.
+        Returns True if anything was changed.
+        """
+        state = load_state()
+        alliances: list[str] = state.get('alliances', [])
+        admirals_map: dict = state.get('admirals', {})
+
+        to_remove: list[str] = []
+        for tag in alliances:
+            alliance_role = discord.utils.get(guild.roles, name=tag)
+            if alliance_role is None or len(alliance_role.members) == 0:
+                to_remove.append(tag)
+
+        if not to_remove:
+            return False
+
+        for tag in to_remove:
+            alliances.remove(tag)
+            admirals_map.pop(tag, None)
+            alliance_role = discord.utils.get(guild.roles, name=tag)
+            if alliance_role is not None:
+                try:
+                    await alliance_role.delete(reason='Auto-removed: alliance has no remaining members')
+                    logger.info('Deleted empty alliance role %s', tag)
+                except discord.Forbidden:
+                    logger.warning('Cannot delete empty alliance role %s — insufficient permissions', tag)
+
+        state['alliances'] = alliances
+        state['admirals'] = admirals_map
+        save_state(state)
+        logger.info('Removed empty alliances: %s', to_remove)
+        return True
+
+    @tasks.loop(hours=1.0)
+    async def _alliance_cleanup_task(self) -> None:
+        for guild in self.guilds:
+            try:
+                changed = await self._cleanup_empty_alliances(guild)
+                if changed:
+                    await self.update_role_list_post(guild)
+            except Exception:
+                logger.exception('Periodic alliance cleanup failed for guild %s', guild.id)
+
+    @_alliance_cleanup_task.before_loop
+    async def _before_alliance_cleanup(self) -> None:
+        await self.wait_until_ready()
+
+    async def on_member_remove(self, member: discord.Member) -> None:
+        # If this member was a registered admiral, clear them from state immediately
+        tag = get_alliance_tag(member)
+        if tag:
+            state = load_state()
+            if state.get('admirals', {}).get(tag) == member.id:
+                del state['admirals'][tag]
+                save_state(state)
+                logger.info('Removed departed admiral %s from registry for %s', member, tag)
+
+        # Check whether any alliance is now empty
+        try:
+            changed = await self._cleanup_empty_alliances(member.guild)
+            if changed:
+                await self.update_role_list_post(member.guild)
+        except Exception:
+            logger.exception('Alliance cleanup failed after member leave: %s', member)
+
     # ── Slash commands ──────────────────────────────────────────────────────
 
     def _register_commands(self) -> None:
@@ -957,6 +1032,7 @@ class WorfBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.add_view(SelfServiceView())
         self.add_view(AdmiralManagementView())
+        self._alliance_cleanup_task.start()
         if GUILD_ID:
             guild_obj = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild_obj)
