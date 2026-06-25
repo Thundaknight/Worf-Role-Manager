@@ -6,6 +6,7 @@ import os
 import json
 import re
 import logging
+from datetime import datetime, timezone
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,15 +14,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger('worf')
 
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 SELF_SERVICE_CHANNEL_ID = int(os.getenv('SELF_SERVICE_CHANNEL_ID', '0'))
 ADMIN_REQUEST_CHANNEL_ID = int(os.getenv('ADMIN_REQUEST_CHANNEL_ID', '0'))
+ADMIRAL_MANAGEMENT_CHANNEL_ID = int(os.getenv('ADMIRAL_MANAGEMENT_CHANNEL_ID', '0'))
 SERVER_ROLE_ID = int(os.getenv('SERVER_ROLE_ID', '0'))
 LEADERSHIP_CATEGORY_ID = int(os.getenv('LEADERSHIP_CATEGORY_ID', '0'))
 ADMIN_ROLE_ID = int(os.getenv('ADMIN_ROLE_ID', '0'))
 GUILD_ID = int(os.getenv('GUILD_ID', '0'))
 
-ROLE_IDS = {
+ROLE_IDS: dict[str, int] = {
     'admiral': int(os.getenv('ADMIRAL_ROLE_ID', '0')),
     'commodore': int(os.getenv('COMMODORE_ROLE_ID', '0')),
     'first_officer': int(os.getenv('FIRST_OFFICER_ROLE_ID', '0')),
@@ -29,13 +35,33 @@ ROLE_IDS = {
     'diplomacy_officer': int(os.getenv('DIPLOMACY_OFFICER_ROLE_ID', '0')),
 }
 
-# Roles routed through admiral/leadership channel when an admiral is registered
+# Roles routed via admiral/leadership channel
 LEADERSHIP_ROLES = frozenset({'commodore', 'first_officer', 'roe_officer', 'diplomacy_officer'})
+
+# Roles that can be removed via the management panel (not admiral — only admin removes admirals)
+REMOVABLE_ROLES = ('commodore', 'first_officer', 'roe_officer', 'diplomacy_officer')
+
+# Display order in the role roster
+ROLE_DISPLAY_ORDER = [
+    ('commodore', 'Commodore'),
+    ('first_officer', '1st Officer'),
+    ('roe_officer', 'RoE Officer'),
+    ('diplomacy_officer', 'Diplomacy Officer'),
+]
+
+ROLE_NAME_MAP: dict[str, str] = {
+    'commodore': 'commodore',
+    'first officer': 'first_officer',
+    '1st officer': 'first_officer',
+    'roe officer': 'roe_officer',
+    'roe': 'roe_officer',
+    'diplomacy officer': 'diplomacy_officer',
+    'diplomacy': 'diplomacy_officer',
+}
 
 APPROVAL_PREFIXES = ('worf:approve:', 'worf:deny:', 'worf:ch_approve:', 'worf:ch_deny:')
 
 STATE_FILE = '/data/bot_state.json'
-
 
 # ---------------------------------------------------------------------------
 # State helpers
@@ -54,7 +80,6 @@ def save_state(state: dict) -> None:
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=2)
 
-
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
@@ -70,6 +95,106 @@ def get_alliance_tag(member: discord.Member) -> str | None:
             return role.name
     return None
 
+
+def strip_alliance_tag(display_name: str) -> str:
+    """Remove [TAG] prefix and leading whitespace from a display name."""
+    return re.sub(r'^\[[A-Z]{4}\]\s*', '', display_name).strip()
+
+
+def find_member_by_name(guild: discord.Guild, name: str) -> discord.Member | None:
+    """Case-insensitive search by stripped display name or Discord username."""
+    name_lower = name.lower().strip()
+    for member in guild.members:
+        if strip_alliance_tag(member.display_name).lower() == name_lower:
+            return member
+        if member.name.lower() == name_lower:
+            return member
+    return None
+
+
+def verify_requester(
+    requester: discord.Member,
+    target: discord.Member,
+    guild: discord.Guild,
+) -> tuple[bool, str]:
+    """
+    Returns (authorised, error_message).
+    Admins may act on any member; admirals only within their own alliance.
+    """
+    if ADMIN_ROLE_ID:
+        admin_role = guild.get_role(ADMIN_ROLE_ID)
+        if admin_role and admin_role in requester.roles:
+            return True, ''
+
+    state = load_state()
+    req_tag = get_alliance_tag(requester)
+    if not req_tag:
+        return False, 'You do not have an alliance tag. Complete the Alliance & In-Game Name form first.'
+
+    if state.get('admirals', {}).get(req_tag) != requester.id:
+        return False, 'You are not the registered admiral of your alliance.'
+
+    target_tag = get_alliance_tag(target)
+    if target_tag != req_tag:
+        tag_str = f'`{target_tag}`' if target_tag else 'no alliance'
+        return False, f'That player ({tag_str}) is not in your alliance (`{req_tag}`).'
+
+    return True, ''
+
+# ---------------------------------------------------------------------------
+# Role roster embed
+# ---------------------------------------------------------------------------
+
+def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed:
+    alliances: list[str] = state.get('alliances', [])
+    admirals_map: dict[str, int] = state.get('admirals', {})
+
+    embed = discord.Embed(
+        title='Alliance Role Roster',
+        color=discord.Color.gold(),
+    )
+
+    if not alliances:
+        embed.description = 'No alliances are currently registered.'
+        return embed
+
+    for tag in sorted(alliances):
+        alliance_role = discord.utils.get(guild.roles, name=tag)
+        admiral_id = admirals_map.get(tag)
+        admiral_member = guild.get_member(admiral_id) if admiral_id else None
+        admiral_name = strip_alliance_tag(admiral_member.display_name) if admiral_member else '*(vacant)*'
+
+        lines = [f'**Admiral:** {admiral_name}']
+
+        for role_key, label in ROLE_DISPLAY_ORDER:
+            role_id = ROLE_IDS.get(role_key, 0)
+            if not role_id:
+                continue
+            role = guild.get_role(role_id)
+            if role is None:
+                continue
+
+            if alliance_role:
+                holders = [m for m in role.members if alliance_role in m.roles]
+            else:
+                holders = list(role.members)
+
+            if holders:
+                names = ', '.join(strip_alliance_tag(m.display_name) for m in holders)
+            else:
+                names = admiral_name  # fallback to admiral
+
+            lines.append(f'**{label}:** {names}')
+
+        now_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        embed.add_field(name=f'[{tag}]', value='\n'.join(lines), inline=False)
+
+    embed.set_footer(text=f'Last updated: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}')
+    return embed
+
+# ---------------------------------------------------------------------------
+# Approval view builder (shared)
+# ---------------------------------------------------------------------------
 
 def _build_request_embed(
     interaction: discord.Interaction,
@@ -111,7 +236,6 @@ def _build_approval_view(
         disabled=disabled,
     ))
     return view
-
 
 # ---------------------------------------------------------------------------
 # Alliance modal
@@ -182,24 +306,20 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
             )
             return
 
-        # Track alliance in state
         state = load_state()
-        alliances = state.setdefault('alliances', [])
-        if tag not in alliances:
-            alliances.append(tag)
+        if tag not in state.setdefault('alliances', []):
+            state['alliances'].append(tag)
             save_state(state)
 
-        # Server-wide member role
         if SERVER_ROLE_ID:
             server_role = guild.get_role(SERVER_ROLE_ID)
             if server_role is None:
-                logger.warning('SERVER_ROLE_ID %s not found in guild', SERVER_ROLE_ID)
+                logger.warning('SERVER_ROLE_ID %s not found', SERVER_ROLE_ID)
             elif server_role not in member.roles:
                 try:
                     await member.add_roles(server_role, reason='Server member role via self-service')
-                    logger.info('Assigned server role %s to %s', server_role.name, member)
                 except discord.Forbidden:
-                    logger.warning('Cannot assign server role %s to %s', server_role.name, member)
+                    logger.warning('Cannot assign server role to %s', member)
 
         await interaction.response.send_message(
             f'Done! Your nickname is now `{new_nick}` and you have been added to the **{tag}** alliance.',
@@ -213,6 +333,193 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
             ephemeral=True,
         )
 
+# ---------------------------------------------------------------------------
+# Admiral management modals
+# ---------------------------------------------------------------------------
+
+class RemoveRoleModal(discord.ui.Modal, title='Remove Role from Member'):
+    target_name = discord.ui.TextInput(
+        label="Member's name (without alliance tag)",
+        placeholder='e.g. Thunder',
+        required=True,
+        max_length=64,
+    )
+    role_input = discord.ui.TextInput(
+        label='Role to remove',
+        placeholder='Commodore / First Officer / RoE Officer / Diplomacy Officer',
+        required=True,
+        max_length=32,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        name = self.target_name.value.strip()
+        raw_role = self.role_input.value.strip().lower()
+
+        role_key = ROLE_NAME_MAP.get(raw_role)
+        if role_key is None:
+            await interaction.response.send_message(
+                f'Unknown role `{self.role_input.value}`. '
+                'Valid options: **Commodore**, **First Officer**, **RoE Officer**, **Diplomacy Officer**.',
+                ephemeral=True,
+            )
+            return
+
+        role_id = ROLE_IDS.get(role_key, 0)
+        if not role_id:
+            await interaction.response.send_message(
+                'That role is not configured on this bot. Contact an administrator.',
+                ephemeral=True,
+            )
+            return
+
+        role = guild.get_role(role_id)
+        if role is None:
+            await interaction.response.send_message(
+                'That role does not exist on this server. Contact an administrator.',
+                ephemeral=True,
+            )
+            return
+
+        target = find_member_by_name(guild, name)
+        if target is None:
+            await interaction.response.send_message(
+                f'Could not find a member named `{name}`. Check the spelling (without the alliance tag).',
+                ephemeral=True,
+            )
+            return
+
+        ok, reason = verify_requester(interaction.user, target, guild)
+        if not ok:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+
+        if role not in target.roles:
+            await interaction.response.send_message(
+                f'{target.mention} does not have the **{role.name}** role.',
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await target.remove_roles(role, reason=f'Removed by {interaction.user}')
+            await interaction.response.send_message(
+                f'**{role.name}** has been removed from {target.mention}.',
+                ephemeral=True,
+            )
+            logger.info('%s removed %s from %s', interaction.user, role.name, target)
+            try:
+                await interaction.client.update_role_list_post(guild)
+            except Exception:
+                logger.exception('Failed to update role list after role removal')
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f'I do not have permission to remove **{role.name}** from {target.mention}. '
+                'Check the bot role hierarchy.',
+                ephemeral=True,
+            )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception('Error in RemoveRoleModal: %s', error)
+        await interaction.response.send_message(
+            'An unexpected error occurred. Please try again.',
+            ephemeral=True,
+        )
+
+
+class RemovePlayerModal(discord.ui.Modal, title='Remove Player from Alliance'):
+    target_name = discord.ui.TextInput(
+        label="Member's name (without alliance tag)",
+        placeholder='e.g. Thunder',
+        required=True,
+        max_length=64,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        name = self.target_name.value.strip()
+
+        target = find_member_by_name(guild, name)
+        if target is None:
+            await interaction.response.send_message(
+                f'Could not find a member named `{name}`. Check the spelling (without the alliance tag).',
+                ephemeral=True,
+            )
+            return
+
+        ok, reason = verify_requester(interaction.user, target, guild)
+        if not ok:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+
+        target_tag = get_alliance_tag(target)
+
+        # Collect every alliance/rank role to strip
+        roles_to_remove: list[discord.Role] = []
+
+        if target_tag:
+            alliance_role = discord.utils.get(guild.roles, name=target_tag)
+            if alliance_role and alliance_role in target.roles:
+                roles_to_remove.append(alliance_role)
+
+        for role_key in ('admiral', 'commodore', 'first_officer', 'roe_officer', 'diplomacy_officer'):
+            rid = ROLE_IDS.get(role_key, 0)
+            if rid:
+                r = guild.get_role(rid)
+                if r and r in target.roles:
+                    roles_to_remove.append(r)
+
+        if not roles_to_remove:
+            await interaction.response.send_message(
+                f'{target.mention} has no alliance or rank roles to remove.',
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await target.remove_roles(*roles_to_remove, reason=f'Removed from alliance by {interaction.user}')
+
+            # Strip the [TAG] prefix from their nickname
+            if target.nick:
+                bare = strip_alliance_tag(target.nick)
+                try:
+                    await target.edit(nick=bare or None)
+                except discord.Forbidden:
+                    pass
+
+            # If this member was a registered admiral, remove from state
+            if target_tag:
+                state = load_state()
+                if state.get('admirals', {}).get(target_tag) == target.id:
+                    del state['admirals'][target_tag]
+                    save_state(state)
+                    logger.info('Removed %s from admiral registry for %s', target, target_tag)
+
+            removed_names = ', '.join(f'**{r.name}**' for r in roles_to_remove)
+            await interaction.response.send_message(
+                f'{target.mention} has been removed from alliance `{target_tag}`. '
+                f'Stripped roles: {removed_names}.',
+                ephemeral=True,
+            )
+            logger.info('%s removed %s from alliance %s', interaction.user, target, target_tag)
+            try:
+                await interaction.client.update_role_list_post(guild)
+            except Exception:
+                logger.exception('Failed to update role list after player removal')
+
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f'I do not have permission to remove roles from {target.mention}. '
+                'Check the bot role hierarchy.',
+                ephemeral=True,
+            )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        logger.exception('Error in RemovePlayerModal: %s', error)
+        await interaction.response.send_message(
+            'An unexpected error occurred. Please try again.',
+            ephemeral=True,
+        )
 
 # ---------------------------------------------------------------------------
 # Role request routing
@@ -242,7 +549,6 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
     admin_role = guild.get_role(ADMIN_ROLE_ID) if ADMIN_ROLE_ID else None
     admin_mention = admin_role.mention if admin_role else '**Admins**'
 
-    # ── Determine routing for leadership roles ──────────────────────────────
     use_leadership_channel = False
     admiral_member = None
     tag = None
@@ -271,7 +577,6 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
                     else:
                         use_leadership_channel = True
 
-    # ── Leadership (temp) channel path ─────────────────────────────────────
     if use_leadership_channel:
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -314,7 +619,6 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
             )
             return
 
-    # ── Admin channel path (admiral + all fallback cases) ──────────────────
     if admin_channel is None:
         await interaction.response.send_message(
             'The admin review channel is not reachable. Please contact an administrator directly.',
@@ -337,9 +641,8 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
     )
     logger.info('Role request for %s from %s posted to admin channel', role.name, interaction.user)
 
-
 # ---------------------------------------------------------------------------
-# Self-service panel
+# Persistent views
 # ---------------------------------------------------------------------------
 
 class SelfServiceView(discord.ui.View):
@@ -352,9 +655,7 @@ class SelfServiceView(discord.ui.View):
         custom_id='worf:change_alliance',
         row=0,
     )
-    async def change_alliance(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    async def change_alliance(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.send_modal(AllianceModal())
 
     @discord.ui.button(
@@ -363,9 +664,7 @@ class SelfServiceView(discord.ui.View):
         custom_id='worf:req_admiral',
         row=1,
     )
-    async def req_admiral(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    async def req_admiral(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await send_role_request(interaction, 'admiral')
 
     @discord.ui.button(
@@ -374,9 +673,7 @@ class SelfServiceView(discord.ui.View):
         custom_id='worf:req_commodore',
         row=1,
     )
-    async def req_commodore(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    async def req_commodore(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await send_role_request(interaction, 'commodore')
 
     @discord.ui.button(
@@ -385,9 +682,7 @@ class SelfServiceView(discord.ui.View):
         custom_id='worf:req_first_officer',
         row=2,
     )
-    async def req_first_officer(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    async def req_first_officer(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await send_role_request(interaction, 'first_officer')
 
     @discord.ui.button(
@@ -396,9 +691,7 @@ class SelfServiceView(discord.ui.View):
         custom_id='worf:req_roe_officer',
         row=2,
     )
-    async def req_roe_officer(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    async def req_roe_officer(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await send_role_request(interaction, 'roe_officer')
 
     @discord.ui.button(
@@ -407,11 +700,31 @@ class SelfServiceView(discord.ui.View):
         custom_id='worf:req_diplomacy_officer',
         row=3,
     )
-    async def req_diplomacy_officer(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    async def req_diplomacy_officer(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await send_role_request(interaction, 'diplomacy_officer')
 
+
+class AdmiralManagementView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label='Remove Role',
+        style=discord.ButtonStyle.danger,
+        custom_id='worf:mgmt_remove_role',
+        row=0,
+    )
+    async def remove_role(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(RemoveRoleModal())
+
+    @discord.ui.button(
+        label='Remove Player from Alliance',
+        style=discord.ButtonStyle.danger,
+        custom_id='worf:mgmt_remove_player',
+        row=0,
+    )
+    async def remove_player(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(RemovePlayerModal())
 
 # ---------------------------------------------------------------------------
 # Bot
@@ -424,6 +737,38 @@ class WorfBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix='!worf ', intents=intents)
         self._register_commands()
+
+    # ── Role roster ─────────────────────────────────────────────────────────
+
+    async def update_role_list_post(self, guild: discord.Guild) -> None:
+        state = load_state()
+        channel_id = state.get('role_list_channel_id')
+        if not channel_id:
+            return
+
+        channel = guild.get_channel(int(channel_id))
+        if channel is None:
+            logger.warning('Role list channel %s not found', channel_id)
+            return
+
+        embed = generate_role_list_embed(guild, state)
+        message_id = state.get('role_list_message_id')
+
+        if message_id:
+            try:
+                msg = await channel.fetch_message(int(message_id))
+                await msg.edit(embed=embed)
+                logger.info('Role list post updated')
+                return
+            except discord.NotFound:
+                logger.warning('Role list message not found; creating new post')
+            except discord.HTTPException as exc:
+                logger.warning('Could not edit role list post: %s', exc)
+
+        msg = await channel.send(embed=embed)
+        state['role_list_message_id'] = msg.id
+        save_state(state)
+        logger.info('Role list post created (message ID: %s)', msg.id)
 
     # ── Slash commands ──────────────────────────────────────────────────────
 
@@ -468,6 +813,10 @@ class WorfBot(commands.Bot):
             save_state(state)
             await interaction.response.send_message(f'Alliance **{tag}** has been registered.')
             logger.info('%s registered alliance %s', interaction.user, tag)
+            try:
+                await self.update_role_list_post(interaction.guild)
+            except Exception:
+                logger.exception('Failed to update role list after /addalliance')
 
         @self.tree.command(
             name='addadmiral',
@@ -517,6 +866,10 @@ class WorfBot(commands.Bot):
                 f'{user.mention} has been registered as Admiral of alliance **{tag}**.'
             )
             logger.info('%s registered %s as admiral of %s', interaction.user, user, tag)
+            try:
+                await self.update_role_list_post(interaction.guild)
+            except Exception:
+                logger.exception('Failed to update role list after /addadmiral')
 
         @self.tree.command(
             name='listadmirals',
@@ -538,10 +891,7 @@ class WorfBot(commands.Bot):
                 )
                 return
 
-            embed = discord.Embed(
-                title='Admiral Roster',
-                color=discord.Color.blue(),
-            )
+            embed = discord.Embed(title='Admiral Roster', color=discord.Color.blue())
             lines = []
             for atag, uid in sorted(admirals.items()):
                 member = interaction.guild.get_member(uid)
@@ -550,10 +900,60 @@ class WorfBot(commands.Bot):
             embed.description = '\n'.join(lines)
             await interaction.response.send_message(embed=embed)
 
+        @self.tree.command(
+            name='setrolelist',
+            description='Set the channel where the alliance role roster is maintained.',
+        )
+        @app_commands.describe(channel='Channel where the role list will be posted and kept updated')
+        async def setrolelist(
+            interaction: discord.Interaction, channel: discord.TextChannel
+        ) -> None:
+            if interaction.channel_id != ADMIN_REQUEST_CHANNEL_ID:
+                await interaction.response.send_message(
+                    'This command can only be used in the designated admin channel.', ephemeral=True
+                )
+                return
+
+            await interaction.response.defer(ephemeral=False)
+
+            state = load_state()
+            old_channel_id = state.get('role_list_channel_id')
+            old_message_id = state.get('role_list_message_id')
+
+            # Remove old post if it exists
+            if old_channel_id and old_message_id:
+                old_ch = interaction.guild.get_channel(int(old_channel_id))
+                if old_ch:
+                    try:
+                        old_msg = await old_ch.fetch_message(int(old_message_id))
+                        await old_msg.delete()
+                        logger.info('Deleted old role list post from channel %s', old_channel_id)
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
+
+            state['role_list_channel_id'] = channel.id
+            state.pop('role_list_message_id', None)
+            save_state(state)
+
+            try:
+                await self.update_role_list_post(interaction.guild)
+                await interaction.followup.send(
+                    f'Alliance role roster is now being maintained in {channel.mention}.'
+                )
+            except Exception:
+                logger.exception('Failed to post role list to new channel')
+                await interaction.followup.send(
+                    f'Channel set to {channel.mention}, but I could not post the roster. '
+                    'Check my permissions in that channel.',
+                    ephemeral=True,
+                )
+            logger.info('%s set role list channel to %s', interaction.user, channel)
+
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
     async def setup_hook(self) -> None:
         self.add_view(SelfServiceView())
+        self.add_view(AdmiralManagementView())
         if GUILD_ID:
             guild_obj = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild_obj)
@@ -566,6 +966,7 @@ class WorfBot(commands.Bot):
     async def on_ready(self) -> None:
         logger.info('Worf is online: %s (ID: %s)', self.user, self.user.id)
         await self._post_or_update_self_service()
+        await self._post_or_update_admiral_management()
 
     # ── Interaction routing ─────────────────────────────────────────────────
 
@@ -595,7 +996,6 @@ class WorfBot(commands.Bot):
         custom_id = interaction.data['custom_id']
         channel_based = custom_id.startswith('worf:ch_')
 
-        # Strip prefix → 'approve:<uid>:<rid>' or 'deny:<uid>:<rid>'
         inner = custom_id[len('worf:ch_'):] if channel_based else custom_id[len('worf:'):]
         parts = inner.split(':', 2)
         if len(parts) != 3:
@@ -646,7 +1046,7 @@ class WorfBot(commands.Bot):
             try:
                 await member.add_roles(role, reason=f'Approved by {interaction.user}')
 
-                # Record admiral → alliance mapping
+                # Record admiral assignment automatically
                 if role_id == ROLE_IDS.get('admiral', 0):
                     atag = get_alliance_tag(member)
                     if atag:
@@ -663,6 +1063,11 @@ class WorfBot(commands.Bot):
                     f'Approved by {interaction.user.mention}.{channel_note}'
                 )
                 logger.info('%s approved %s for %s', interaction.user, role.name, member)
+
+                try:
+                    await self.update_role_list_post(guild)
+                except Exception:
+                    logger.exception('Failed to update role list after approval')
 
             except discord.Forbidden:
                 await interaction.response.edit_message(view=disabled_view)
@@ -684,15 +1089,12 @@ class WorfBot(commands.Bot):
             logger.info('%s denied role ID %s for user ID %s', interaction.user, role_id, requester_id)
             await cleanup()
 
-    # ── Self-service post ───────────────────────────────────────────────────
+    # ── Panel posts ─────────────────────────────────────────────────────────
 
     async def _post_or_update_self_service(self) -> None:
         channel = self.get_channel(SELF_SERVICE_CHANNEL_ID)
         if channel is None:
-            logger.error(
-                'Self-service channel ID %s not found. Check SELF_SERVICE_CHANNEL_ID.',
-                SELF_SERVICE_CHANNEL_ID,
-            )
+            logger.error('Self-service channel ID %s not found.', SELF_SERVICE_CHANNEL_ID)
             return
 
         state = load_state()
@@ -712,7 +1114,7 @@ class WorfBot(commands.Bot):
                 logger.info('Self-service post updated (message ID: %s)', message_id)
                 return
             except discord.NotFound:
-                logger.warning('Stored self-service message not found; creating a new post.')
+                logger.warning('Stored self-service message not found; creating new post.')
             except discord.HTTPException as exc:
                 logger.warning('Could not edit self-service message: %s', exc)
 
@@ -721,6 +1123,45 @@ class WorfBot(commands.Bot):
         save_state(state)
         logger.info('Self-service post created (message ID: %s)', msg.id)
 
+    async def _post_or_update_admiral_management(self) -> None:
+        if not ADMIRAL_MANAGEMENT_CHANNEL_ID:
+            return
+
+        channel = self.get_channel(ADMIRAL_MANAGEMENT_CHANNEL_ID)
+        if channel is None:
+            logger.warning('Admiral management channel %s not found.', ADMIRAL_MANAGEMENT_CHANNEL_ID)
+            return
+
+        state = load_state()
+        message_id = state.get('admiral_management_message_id')
+
+        embed = discord.Embed(
+            title='Alliance Management',
+            description=(
+                'Use the buttons below to manage alliance members and roles.\n\n'
+                '**Remove Role** — remove a rank from a member in your alliance.\n'
+                '**Remove Player** — fully remove a member from your alliance, '
+                'stripping all roles and their alliance tag.'
+            ),
+            color=discord.Color.dark_red(),
+        )
+        view = AdmiralManagementView()
+
+        if message_id:
+            try:
+                msg = await channel.fetch_message(int(message_id))
+                await msg.edit(embed=embed, view=view)
+                logger.info('Admiral management post updated (message ID: %s)', message_id)
+                return
+            except discord.NotFound:
+                logger.warning('Stored admiral management message not found; creating new post.')
+            except discord.HTTPException as exc:
+                logger.warning('Could not edit admiral management message: %s', exc)
+
+        msg = await channel.send(embed=embed, view=view)
+        state['admiral_management_message_id'] = msg.id
+        save_state(state)
+        logger.info('Admiral management post created (message ID: %s)', msg.id)
 
 # ---------------------------------------------------------------------------
 # Entry point
