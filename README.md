@@ -57,13 +57,13 @@ cp .env.example .env
 | `DISCORD_TOKEN` | Yes | — | Bot token from the Developer Portal |
 | `SELF_SERVICE_CHANNEL_ID` | Yes | — | Channel ID where Worf posts the self-service panel |
 | `ADMIN_REQUEST_CHANNEL_ID` | Yes | — | Channel ID where role requests appear for admin review |
-| `ADMIRAL_ROLE_NAME` | No | `Admiral` | Exact name of the Admiral role on your server |
-| `COMMODORE_ROLE_NAME` | No | `Commodore` | Exact name of the Commodore role |
-| `FIRST_OFFICER_ROLE_NAME` | No | `First Officer` | Exact name of the First Officer role |
-| `ROE_OFFICER_ROLE_NAME` | No | `RoE Officer` | Exact name of the RoE Officer role |
-| `DIPLOMACY_OFFICER_ROLE_NAME` | No | `Diplomacy Officer` | Exact name of the Diplomacy Officer role |
+| `ADMIRAL_ROLE_ID` | No | `0` | Role ID of the Admiral role |
+| `COMMODORE_ROLE_ID` | No | `0` | Role ID of the Commodore role |
+| `FIRST_OFFICER_ROLE_ID` | No | `0` | Role ID of the First Officer role |
+| `ROE_OFFICER_ROLE_ID` | No | `0` | Role ID of the RoE Officer role |
+| `DIPLOMACY_OFFICER_ROLE_ID` | No | `0` | Role ID of the Diplomacy Officer role |
 
-> Role name variables must match **exactly** (including capitalisation and spaces) the role names on your Discord server.
+> To find a role ID: enable Developer Mode in Discord (*User Settings → Advanced → Developer Mode*), then go to *Server Settings → Roles*, right-click a role and choose **Copy Role ID**. A value of `0` disables that request button.
 
 ---
 

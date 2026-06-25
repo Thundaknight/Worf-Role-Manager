@@ -17,12 +17,12 @@ ADMIN_REQUEST_CHANNEL_ID = int(os.getenv('ADMIN_REQUEST_CHANNEL_ID', '0'))
 
 SERVER_ROLE_ID = int(os.getenv('SERVER_ROLE_ID', '0'))
 
-ROLE_NAMES = {
-    'admiral': os.getenv('ADMIRAL_ROLE_NAME', 'Admiral'),
-    'commodore': os.getenv('COMMODORE_ROLE_NAME', 'Commodore'),
-    'first_officer': os.getenv('FIRST_OFFICER_ROLE_NAME', 'First Officer'),
-    'roe_officer': os.getenv('ROE_OFFICER_ROLE_NAME', 'RoE Officer'),
-    'diplomacy_officer': os.getenv('DIPLOMACY_OFFICER_ROLE_NAME', 'Diplomacy Officer'),
+ROLE_IDS = {
+    'admiral': int(os.getenv('ADMIRAL_ROLE_ID', '0')),
+    'commodore': int(os.getenv('COMMODORE_ROLE_ID', '0')),
+    'first_officer': int(os.getenv('FIRST_OFFICER_ROLE_ID', '0')),
+    'roe_officer': int(os.getenv('ROE_OFFICER_ROLE_ID', '0')),
+    'diplomacy_officer': int(os.getenv('DIPLOMACY_OFFICER_ROLE_ID', '0')),
 }
 
 STATE_FILE = '/data/bot_state.json'
@@ -138,7 +138,7 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
 
 
 async def send_role_request(interaction: discord.Interaction, role_key: str) -> None:
-    role_name = ROLE_NAMES[role_key]
+    role_id = ROLE_IDS[role_key]
     admin_channel = interaction.client.get_channel(ADMIN_REQUEST_CHANNEL_ID)
 
     if admin_channel is None:
@@ -148,8 +148,24 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
         )
         return
 
+    if not role_id:
+        await interaction.response.send_message(
+            "This role has not been configured yet. Please contact an administrator.",
+            ephemeral=True,
+        )
+        return
+
+    role = interaction.guild.get_role(role_id)
+    if role is None:
+        await interaction.response.send_message(
+            "The requested role could not be found on this server. Please contact an administrator.",
+            ephemeral=True,
+        )
+        logger.warning("Role ID %s for key '%s' not found in guild", role_id, role_key)
+        return
+
     await interaction.response.send_message(
-        f"Your request for the **{role_name}** role is under review. "
+        f"Your request for the **{role.name}** role is under review. "
         "An administrator will action it shortly.",
         ephemeral=True,
     )
@@ -163,24 +179,24 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
         value=f"{interaction.user.mention} (`{interaction.user}`, ID: `{interaction.user.id}`)",
         inline=False,
     )
-    embed.add_field(name="Requested Role", value=f"**{role_name}**", inline=False)
+    embed.add_field(name="Requested Role", value=f"**{role.name}** (ID: `{role.id}`)", inline=False)
     embed.set_footer(text=f"Server: {interaction.guild.name}")
 
     view = discord.ui.View(timeout=None)
     view.add_item(discord.ui.Button(
         label="Approve",
         style=discord.ButtonStyle.success,
-        custom_id=f"worf:approve:{interaction.user.id}:{role_name}",
+        custom_id=f"worf:approve:{interaction.user.id}:{role.id}",
     ))
     view.add_item(discord.ui.Button(
         label="Deny",
         style=discord.ButtonStyle.danger,
-        custom_id=f"worf:deny:{interaction.user.id}:{role_name}",
+        custom_id=f"worf:deny:{interaction.user.id}:{role.id}",
     ))
 
     await admin_channel.send(embed=embed, view=view)
     logger.info(
-        "Role request posted for %s requesting %s", interaction.user, role_name
+        "Role request posted for %s requesting %s (ID: %s)", interaction.user, role.name, role.id
     )
 
 
@@ -255,18 +271,18 @@ class SelfServiceView(discord.ui.View):
         await send_role_request(interaction, 'diplomacy_officer')
 
 
-def _build_disabled_approval_view(requester_id: int, role_name: str) -> discord.ui.View:
+def _build_disabled_approval_view(requester_id: int, role_id: int) -> discord.ui.View:
     view = discord.ui.View()
     view.add_item(discord.ui.Button(
         label="Approve",
         style=discord.ButtonStyle.success,
-        custom_id=f"worf:approve:{requester_id}:{role_name}",
+        custom_id=f"worf:approve:{requester_id}:{role_id}",
         disabled=True,
     ))
     view.add_item(discord.ui.Button(
         label="Deny",
         style=discord.ButtonStyle.danger,
-        custom_id=f"worf:deny:{requester_id}:{role_name}",
+        custom_id=f"worf:deny:{requester_id}:{role_id}",
         disabled=True,
     ))
     return view
@@ -310,7 +326,7 @@ class WorfBot(commands.Bot):
 
     async def _handle_role_decision(self, interaction: discord.Interaction) -> None:
         custom_id = interaction.data['custom_id']
-        # Format: worf:approve:<user_id>:<role_name>  (role_name may contain colons)
+        # Format: worf:approve:<user_id>:<role_id>
         parts = custom_id.split(':', 3)
 
         if len(parts) != 4:
@@ -319,29 +335,30 @@ class WorfBot(commands.Bot):
             )
             return
 
-        _, action, requester_id_str, role_name = parts
+        _, action, requester_id_str, role_id_str = parts
         requester_id = int(requester_id_str)
+        role_id = int(role_id_str)
         approved = action == 'approve'
 
-        disabled_view = _build_disabled_approval_view(requester_id, role_name)
+        disabled_view = _build_disabled_approval_view(requester_id, role_id)
         guild = interaction.guild
         member = guild.get_member(requester_id)
+        role = guild.get_role(role_id)
 
         if approved:
             if member is None:
                 await interaction.response.edit_message(view=disabled_view)
                 await interaction.followup.send(
                     f"Could not locate user (ID: `{requester_id}`) — they may have left the server. "
-                    f"Role **{role_name}** was not assigned."
+                    f"Role was not assigned."
                 )
                 return
 
-            role = discord.utils.get(guild.roles, name=role_name)
             if role is None:
                 await interaction.response.edit_message(view=disabled_view)
                 await interaction.followup.send(
-                    f"Error: Role **{role_name}** does not exist on this server. "
-                    "Please create it and process this request again."
+                    f"Error: Role ID `{role_id}` no longer exists on this server. "
+                    "Please verify the role and resubmit the request."
                 )
                 return
 
@@ -349,27 +366,28 @@ class WorfBot(commands.Bot):
                 await member.add_roles(role, reason=f"Role approved by {interaction.user}")
                 await interaction.response.edit_message(view=disabled_view)
                 await interaction.followup.send(
-                    f"Role **{role_name}** has been granted to {member.mention}. "
+                    f"Role **{role.name}** has been granted to {member.mention}. "
                     f"Approved by {interaction.user.mention}."
                 )
                 logger.info(
-                    "%s approved %s for %s", interaction.user, role_name, member
+                    "%s approved %s (ID: %s) for %s", interaction.user, role.name, role.id, member
                 )
             except discord.Forbidden:
                 await interaction.response.edit_message(view=disabled_view)
                 await interaction.followup.send(
-                    f"Error: I do not have permission to assign **{role_name}** to {member.mention}. "
+                    f"Error: I do not have permission to assign **{role.name}** to {member.mention}. "
                     "Ensure the Worf bot role is above this role in the server role hierarchy."
                 )
         else:
             await interaction.response.edit_message(view=disabled_view)
             member_mention = member.mention if member else f"User ID `{requester_id}`"
+            role_display = f"**{role.name}**" if role else f"role ID `{role_id}`"
             await interaction.followup.send(
-                f"Role request for **{role_name}** from {member_mention} was denied by "
+                f"Role request for {role_display} from {member_mention} was denied by "
                 f"{interaction.user.mention}."
             )
             logger.info(
-                "%s denied %s for user ID %s", interaction.user, role_name, requester_id
+                "%s denied role ID %s for user ID %s", interaction.user, role_id, requester_id
             )
 
     async def _post_or_update_self_service(self) -> None:
