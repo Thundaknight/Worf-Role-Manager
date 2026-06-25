@@ -164,11 +164,6 @@ def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed
         admiral_member = guild.get_member(admiral_id) if admiral_id else None
         admiral_name = strip_alliance_tag(admiral_member.display_name) if admiral_member else '*(vacant)*'
 
-        # No admiral registered — show stub entry only
-        if not admiral_member:
-            embed.add_field(name=f'[{tag}]', value=f'**Admiral:** {admiral_name}', inline=False)
-            continue
-
         lines = [f'**Admiral:** {admiral_name}']
 
         for role_key, label in ROLE_DISPLAY_ORDER:
@@ -186,10 +181,10 @@ def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed
 
             if holders:
                 names = ', '.join(strip_alliance_tag(m.display_name) for m in holders)
-            else:
-                names = admiral_name  # fallback to admiral
-
-            lines.append(f'**{label}:** {names}')
+                lines.append(f'**{label}:** {names}')
+            elif admiral_member:
+                lines.append(f'**{label}:** {admiral_name}')
+            # no holders and no admiral — omit this role line entirely
 
         embed.add_field(name=f'[{tag}]', value='\n'.join(lines), inline=False)
 
