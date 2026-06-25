@@ -580,6 +580,9 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
     if use_leadership_channel:
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
+            ),
             admiral_member: discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, read_message_history=True
             ),
