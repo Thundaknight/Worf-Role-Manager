@@ -1048,6 +1048,87 @@ class WorfBot(commands.Bot):
                 )
             logger.info('%s set role list channel to %s', interaction.user, channel)
 
+        @self.tree.command(
+            name='resetplayer',
+            description='Fully reset a player: remove all alliance/officer/server roles and clear their nickname.',
+        )
+        @app_commands.describe(user='The member to reset')
+        async def resetplayer(interaction: discord.Interaction, user: discord.Member) -> None:
+            if interaction.channel_id != ADMIN_REQUEST_CHANNEL_ID:
+                await interaction.response.send_message(
+                    'This command can only be used in the designated admin channel.', ephemeral=True
+                )
+                return
+
+            # Require the caller to hold the admin role
+            if ADMIN_ROLE_ID:
+                admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
+                if admin_role and admin_role not in interaction.user.roles:
+                    await interaction.response.send_message(
+                        'Only administrators can use this command.', ephemeral=True
+                    )
+                    return
+
+            await interaction.response.defer(ephemeral=False)
+
+            guild = interaction.guild
+            tag = get_alliance_tag(user)
+
+            # Collect every role to strip
+            roles_to_remove: list[discord.Role] = []
+
+            if tag:
+                alliance_role = discord.utils.get(guild.roles, name=tag)
+                if alliance_role and alliance_role in user.roles:
+                    roles_to_remove.append(alliance_role)
+
+            for role_key in ('admiral', 'commodore', 'first_officer', 'roe_officer', 'diplomacy_officer'):
+                rid = ROLE_IDS.get(role_key, 0)
+                if rid:
+                    r = guild.get_role(rid)
+                    if r and r in user.roles:
+                        roles_to_remove.append(r)
+
+            if SERVER_ROLE_ID:
+                server_role = guild.get_role(SERVER_ROLE_ID)
+                if server_role and server_role in user.roles:
+                    roles_to_remove.append(server_role)
+
+            errors: list[str] = []
+
+            if roles_to_remove:
+                try:
+                    await user.remove_roles(*roles_to_remove, reason=f'Player reset by {interaction.user}')
+                except discord.Forbidden:
+                    errors.append('Could not remove one or more roles (check bot role hierarchy).')
+
+            try:
+                await user.edit(nick=None, reason=f'Player reset by {interaction.user}')
+            except discord.Forbidden:
+                errors.append('Could not reset nickname (check bot role hierarchy).')
+
+            # Clear from admiral registry if registered
+            if tag:
+                state = load_state()
+                if state.get('admirals', {}).get(tag) == user.id:
+                    del state['admirals'][tag]
+                    save_state(state)
+                    logger.info('Cleared admiral registry for %s after reset', user)
+
+            stripped = ', '.join(f'**{r.name}**' for r in roles_to_remove) if roles_to_remove else '*(none)*'
+            result = f'{user.mention} has been reset.\nStripped roles: {stripped}.'
+            if errors:
+                result += '\n⚠️ ' + ' '.join(errors)
+
+            await interaction.followup.send(result)
+            logger.info('%s reset player %s (tag: %s, roles removed: %s)', interaction.user, user, tag, stripped)
+
+            try:
+                await self._cleanup_empty_alliances(guild)
+                await self.update_role_list_post(guild)
+            except Exception:
+                logger.exception('Failed to update role list after /resetplayer')
+
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
     async def setup_hook(self) -> None:
