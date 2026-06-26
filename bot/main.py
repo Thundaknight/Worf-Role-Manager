@@ -87,18 +87,18 @@ def save_state(state: dict) -> None:
 def get_alliance_tag(member: discord.Member) -> str | None:
     """Extract [TAG] from nickname, falling back to a bare 4-letter role name."""
     if member.nick:
-        m = re.match(r'^\[([A-Z]{3,4})\]', member.nick)
+        m = re.match(r'^\[([A-Z]{2,4})\]', member.nick)
         if m:
             return m.group(1)
     for role in member.roles:
-        if re.match(r'^[A-Z]{3,4}$', role.name):
+        if re.match(r'^[A-Z]{2,4}$', role.name):
             return role.name
     return None
 
 
 def strip_alliance_tag(display_name: str) -> str:
     """Remove [TAG] prefix and leading whitespace from a display name."""
-    return re.sub(r'^\[[A-Z]{3,4}\]\s*', '', display_name).strip()
+    return re.sub(r'^\[[A-Z]{2,4}\]\s*', '', display_name).strip()
 
 
 def find_member_by_name(guild: discord.Guild, name: str) -> discord.Member | None:
@@ -248,10 +248,10 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
         max_length=32,
     )
     alliance_tag = discord.ui.TextInput(
-        label='Alliance Tag (3-4 letters, A-Z only)',
+        label='Alliance Tag (2-4 letters, A-Z only)',
         placeholder='e.g. TREK',
         required=True,
-        min_length=3,
+        min_length=2,
         max_length=4,
     )
 
@@ -259,9 +259,9 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
         tag = self.alliance_tag.value.upper().strip()
         name = self.ingame_name.value.strip()
 
-        if not re.match(r'^[A-Z]{3,4}$', tag):
+        if not re.match(r'^[A-Z]{2,4}$', tag):
             await interaction.response.send_message(
-                'Invalid alliance tag. Must be 3-4 letters A-Z with no numbers or special characters.',
+                'Invalid alliance tag. Must be 2-4 letters A-Z with no numbers or special characters.',
                 ephemeral=True,
             )
             return
@@ -886,9 +886,9 @@ class WorfBot(commands.Bot):
                 return
 
             tag = tag.upper().strip()
-            if not re.match(r'^[A-Z]{3,4}$', tag):
+            if not re.match(r'^[A-Z]{2,4}$', tag):
                 await interaction.response.send_message(
-                    'Invalid tag. Must be 3-4 letters A-Z.', ephemeral=True
+                    'Invalid tag. Must be 2-4 letters A-Z.', ephemeral=True
                 )
                 return
 
@@ -935,9 +935,9 @@ class WorfBot(commands.Bot):
                 return
 
             tag = tag.upper().strip()
-            if not re.match(r'^[A-Z]{3,4}$', tag):
+            if not re.match(r'^[A-Z]{2,4}$', tag):
                 await interaction.response.send_message(
-                    'Invalid tag. Must be 3-4 letters A-Z.', ephemeral=True
+                    'Invalid tag. Must be 2-4 letters A-Z.', ephemeral=True
                 )
                 return
 
