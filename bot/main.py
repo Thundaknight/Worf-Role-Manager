@@ -1,7 +1,7 @@
 import asyncio
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 import os
 import json
 import re
@@ -803,14 +803,13 @@ class WorfBot(commands.Bot):
 
     async def _cleanup_empty_alliances(self, guild: discord.Guild) -> bool:
         """
-        Remove any registered alliance that has no members in the guild.
-        Membership is determined by scanning guild.members directly rather than
-        relying on role.members, which can be empty if the cache isn't fully
-        populated yet.
+        Remove any registered alliance whose Discord role exists and has zero
+        members. Alliances whose role is missing are left untouched so that
+        manually-restored state or not-yet-created roles are not wiped.
         Returns True if anything was changed.
         """
         if not guild.members:
-            logger.warning('Guild member cache is empty — skipping alliance cleanup to avoid false positives')
+            logger.warning('Guild member cache is empty — skipping alliance cleanup')
             return False
 
         state = load_state()
@@ -819,8 +818,11 @@ class WorfBot(commands.Bot):
 
         to_remove: list[str] = []
         for tag in alliances:
-            has_members = any(get_alliance_tag(m) == tag for m in guild.members)
-            if not has_members:
+            alliance_role = discord.utils.get(guild.roles, name=tag)
+            if alliance_role is None:
+                logger.warning('Alliance role %s not found — skipping cleanup for this tag', tag)
+                continue
+            if len(alliance_role.members) == 0:
                 to_remove.append(tag)
 
         if not to_remove:
@@ -842,21 +844,6 @@ class WorfBot(commands.Bot):
         save_state(state)
         logger.info('Removed empty alliances: %s', to_remove)
         return True
-
-    @tasks.loop(hours=1.0)
-    async def _alliance_cleanup_task(self) -> None:
-        for guild in self.guilds:
-            try:
-                changed = await self._cleanup_empty_alliances(guild)
-                if changed:
-                    await self.update_role_list_post(guild)
-            except Exception:
-                logger.exception('Periodic alliance cleanup failed for guild %s', guild.id)
-
-    @_alliance_cleanup_task.before_loop
-    async def _before_alliance_cleanup(self) -> None:
-        await self.wait_until_ready()
-        await asyncio.sleep(300)  # 5 min grace period for member cache to fully populate
 
     async def on_member_remove(self, member: discord.Member) -> None:
         # If this member was a registered admiral, clear them from state immediately
@@ -1141,7 +1128,6 @@ class WorfBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.add_view(SelfServiceView())
         self.add_view(AdmiralManagementView())
-        self._alliance_cleanup_task.start()
         if GUILD_ID:
             guild_obj = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild_obj)
@@ -1178,7 +1164,8 @@ class WorfBot(commands.Bot):
                         pass
                 return
 
-        await super().on_interaction(interaction)
+        # Views and slash commands are handled by discord.py's internal
+        # listeners; no forwarding needed here.
 
     async def _handle_role_decision(self, interaction: discord.Interaction) -> None:
         custom_id = interaction.data['custom_id']
