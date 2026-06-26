@@ -803,18 +803,24 @@ class WorfBot(commands.Bot):
 
     async def _cleanup_empty_alliances(self, guild: discord.Guild) -> bool:
         """
-        Remove any registered alliance whose role has zero members.
-        Deletes the Discord role and removes the entry from state.
+        Remove any registered alliance that has no members in the guild.
+        Membership is determined by scanning guild.members directly rather than
+        relying on role.members, which can be empty if the cache isn't fully
+        populated yet.
         Returns True if anything was changed.
         """
+        if not guild.members:
+            logger.warning('Guild member cache is empty — skipping alliance cleanup to avoid false positives')
+            return False
+
         state = load_state()
         alliances: list[str] = state.get('alliances', [])
         admirals_map: dict = state.get('admirals', {})
 
         to_remove: list[str] = []
         for tag in alliances:
-            alliance_role = discord.utils.get(guild.roles, name=tag)
-            if alliance_role is None or len(alliance_role.members) == 0:
+            has_members = any(get_alliance_tag(m) == tag for m in guild.members)
+            if not has_members:
                 to_remove.append(tag)
 
         if not to_remove:
@@ -850,6 +856,7 @@ class WorfBot(commands.Bot):
     @_alliance_cleanup_task.before_loop
     async def _before_alliance_cleanup(self) -> None:
         await self.wait_until_ready()
+        await asyncio.sleep(300)  # 5 min grace period for member cache to fully populate
 
     async def on_member_remove(self, member: discord.Member) -> None:
         # If this member was a registered admiral, clear them from state immediately
