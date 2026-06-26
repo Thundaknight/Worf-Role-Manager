@@ -162,10 +162,10 @@ def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed
         alliance_role = discord.utils.get(guild.roles, name=tag)
         admiral_id = admirals_map.get(tag)
         admiral_member = guild.get_member(admiral_id) if admiral_id else None
-        admiral_name = strip_alliance_tag(admiral_member.display_name) if admiral_member else '*(vacant)*'
+        admiral_name = strip_alliance_tag(admiral_member.display_name) if admiral_member else None
 
-        lines = [f'**Admiral:** {admiral_name}']
-
+        # Build sub-role lines
+        sub_lines: list[str] = []
         for role_key, label in ROLE_DISPLAY_ORDER:
             role_id = ROLE_IDS.get(role_key, 0)
             if not role_id:
@@ -177,14 +177,24 @@ def generate_role_list_embed(guild: discord.Guild, state: dict) -> discord.Embed
             if alliance_role:
                 holders = [m for m in role.members if alliance_role in m.roles]
             else:
-                holders = []  # can't determine alliance membership without the role
+                holders = []
 
             if holders:
                 names = ', '.join(strip_alliance_tag(m.display_name) for m in holders)
-                lines.append(f'**{label}:** {names}')
+                sub_lines.append(f'**{label}:** {names}')
             elif admiral_member:
-                lines.append(f'**{label}:** {admiral_name}')
-            # no holders and no admiral — omit this role line entirely
+                sub_lines.append(f'**{label}:** {admiral_name}')
+            # no holders and no admiral — omit
+
+        if admiral_member:
+            # Full roster: admiral header + sub-roles
+            lines = [f'**Admiral:** {admiral_name}'] + sub_lines
+        elif sub_lines:
+            # Some roles filled but no admiral — show roles only, omit admiral line
+            lines = sub_lines
+        else:
+            # Nothing assigned yet — stub entry
+            lines = ['**Admiral:** *(unassigned)*']
 
         embed.add_field(name=f'[{tag}]', value='\n'.join(lines), inline=False)
 
