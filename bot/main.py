@@ -645,6 +645,10 @@ async def send_role_request(interaction: discord.Interaction, role_key: str) -> 
                 f'Your request for **{role.name}** has been sent to your alliance admiral for review.',
                 ephemeral=True,
             )
+            # Wait 20 s so the admiral opens the empty channel before the message
+            # is posted — this ensures it arrives as a live message rather than
+            # history they may not see on first open.
+            await asyncio.sleep(20)
             embed = _build_request_embed(interaction, role, tag=tag)
             view = _build_approval_view(interaction.user.id, role.id, channel_based=True)
             await temp_channel.send(
