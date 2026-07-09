@@ -293,14 +293,23 @@ class AllianceModal(discord.ui.Modal, title='Update Alliance & In-Game Name'):
             )
             return
 
-        # Remove old alliance role when switching tags
+        # Remove old alliance role and rank roles when switching tags
         if switching:
+            roles_to_strip: list[discord.Role] = []
             old_role = discord.utils.get(guild.roles, name=old_tag)
             if old_role and old_role in member.roles:
+                roles_to_strip.append(old_role)
+            for role_key in REMOVABLE_ROLES:
+                rid = ROLE_IDS.get(role_key, 0)
+                if rid:
+                    r = guild.get_role(rid)
+                    if r and r in member.roles:
+                        roles_to_strip.append(r)
+            if roles_to_strip:
                 try:
-                    await member.remove_roles(old_role, reason=f'Alliance change: {old_tag} → {tag}')
+                    await member.remove_roles(*roles_to_strip, reason=f'Alliance change: {old_tag} → {tag}')
                 except discord.Forbidden:
-                    logger.warning('Cannot remove old alliance role %s from %s', old_tag, member)
+                    logger.warning('Cannot remove roles from %s on tag switch', member)
 
         role = discord.utils.get(guild.roles, name=tag)
         if role is None:
@@ -1136,6 +1145,67 @@ class WorfBot(commands.Bot):
                 await self.update_role_list_post(guild)
             except Exception:
                 logger.exception('Failed to update role list after /resetplayer')
+
+        @self.tree.command(
+            name='removealliance',
+            description='Remove an alliance from monitoring and strip the role from all members who hold it.',
+        )
+        @app_commands.describe(tag='The alliance tag to remove (A-Z only)')
+        async def removealliance(interaction: discord.Interaction, tag: str) -> None:
+            if interaction.channel_id != ADMIN_REQUEST_CHANNEL_ID:
+                await interaction.response.send_message(
+                    'This command can only be used in the designated admin channel.', ephemeral=True
+                )
+                return
+
+            if ADMIN_ROLE_ID:
+                admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
+                if admin_role and admin_role not in interaction.user.roles:
+                    await interaction.response.send_message(
+                        'Only administrators can use this command.', ephemeral=True
+                    )
+                    return
+
+            tag = tag.upper().strip()
+            state = load_state()
+            alliances = state.get('alliances', [])
+            if tag not in alliances:
+                await interaction.response.send_message(
+                    f'Alliance `{tag}` is not currently monitored.', ephemeral=True
+                )
+                return
+
+            await interaction.response.defer(ephemeral=False)
+
+            guild = interaction.guild
+            alliance_role = discord.utils.get(guild.roles, name=tag)
+            stripped_count = 0
+
+            if alliance_role:
+                holders = list(alliance_role.members)
+                for member in holders:
+                    try:
+                        await member.remove_roles(alliance_role, reason=f'/removealliance {tag} by {interaction.user}')
+                        stripped_count += 1
+                    except discord.Forbidden:
+                        logger.warning('Cannot remove alliance role %s from %s', tag, member)
+
+            alliances.remove(tag)
+            admirals = state.get('admirals', {})
+            if tag in admirals:
+                del admirals[tag]
+            save_state(state)
+            logger.info('%s removed alliance %s (%d members stripped)', interaction.user, tag, stripped_count)
+
+            msg = f'Alliance **{tag}** has been removed from monitoring. {stripped_count} member(s) had the role stripped.'
+            if alliance_role is None:
+                msg += f'\n*(No Discord role named `{tag}` was found — only the registry entry was removed.)*'
+            await interaction.followup.send(msg)
+
+            try:
+                await self.update_role_list_post(guild)
+            except Exception:
+                logger.exception('Failed to update role list after /removealliance')
 
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
