@@ -1207,6 +1207,114 @@ class WorfBot(commands.Bot):
             except Exception:
                 logger.exception('Failed to update role list after /removealliance')
 
+        @self.tree.command(
+            name='setplayer',
+            description="Set a player's alliance tag and in-game name, updating their roles accordingly.",
+        )
+        @app_commands.describe(
+            user='The member to update',
+            tag='New alliance tag (2-4 letters A-Z)',
+            ingame_name='New in-game name',
+        )
+        async def setplayer(
+            interaction: discord.Interaction, user: discord.Member, tag: str, ingame_name: str
+        ) -> None:
+            if interaction.channel_id != ADMIN_REQUEST_CHANNEL_ID:
+                await interaction.response.send_message(
+                    'This command can only be used in the designated admin channel.', ephemeral=True
+                )
+                return
+
+            if ADMIN_ROLE_ID:
+                admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
+                if admin_role and admin_role not in interaction.user.roles:
+                    await interaction.response.send_message(
+                        'Only administrators can use this command.', ephemeral=True
+                    )
+                    return
+
+            tag = tag.upper().strip()
+            if not re.match(r'^[A-Z]{2,4}$', tag):
+                await interaction.response.send_message(
+                    'Invalid tag. Must be 2-4 letters A-Z.', ephemeral=True
+                )
+                return
+
+            ingame_name = ingame_name.strip()
+            if not ingame_name:
+                await interaction.response.send_message(
+                    'In-game name cannot be empty.', ephemeral=True
+                )
+                return
+
+            await interaction.response.defer(ephemeral=False)
+
+            guild = interaction.guild
+            old_tag = get_alliance_tag(user)
+            switching = old_tag is not None and old_tag != tag
+
+            new_nick = f'[{tag}] {ingame_name}'
+            errors: list[str] = []
+
+            try:
+                await user.edit(nick=new_nick, reason=f'setplayer by {interaction.user}')
+            except discord.Forbidden:
+                errors.append('Could not update nickname (check bot role hierarchy).')
+
+            if switching:
+                roles_to_strip: list[discord.Role] = []
+                old_role = discord.utils.get(guild.roles, name=old_tag)
+                if old_role and old_role in user.roles:
+                    roles_to_strip.append(old_role)
+                for role_key in REMOVABLE_ROLES:
+                    rid = ROLE_IDS.get(role_key, 0)
+                    if rid:
+                        r = guild.get_role(rid)
+                        if r and r in user.roles:
+                            roles_to_strip.append(r)
+                if roles_to_strip:
+                    try:
+                        await user.remove_roles(*roles_to_strip, reason=f'Alliance change via setplayer: {old_tag} → {tag}')
+                    except discord.Forbidden:
+                        errors.append('Could not remove old alliance/rank roles (check bot role hierarchy).')
+
+            alliance_role = discord.utils.get(guild.roles, name=tag)
+            if alliance_role is None:
+                try:
+                    alliance_role = await guild.create_role(
+                        name=tag, reason=f'Auto-created by /setplayer for {user}'
+                    )
+                except discord.Forbidden:
+                    errors.append(f'Could not create alliance role `{tag}`.')
+
+            if alliance_role and alliance_role not in user.roles:
+                try:
+                    await user.add_roles(alliance_role, reason=f'setplayer by {interaction.user}')
+                except discord.Forbidden:
+                    errors.append(f'Could not assign alliance role `{tag}`.')
+
+            state = load_state()
+            if tag not in state.setdefault('alliances', []):
+                state['alliances'].append(tag)
+            if switching and state.get('admirals', {}).get(old_tag) == user.id:
+                del state['admirals'][old_tag]
+                logger.info('Cleared admiral registry for %s (setplayer tag switch: %s → %s)', user, old_tag, tag)
+            save_state(state)
+
+            result = f'{user.mention} updated: nickname set to `{new_nick}`, alliance role `{tag}` assigned.'
+            if switching:
+                result += f' Removed old tag `{old_tag}` role and any rank roles.'
+            if errors:
+                result += '\n⚠️ ' + ' '.join(errors)
+
+            await interaction.followup.send(result)
+            logger.info('%s used setplayer on %s → [%s] %s', interaction.user, user, tag, ingame_name)
+
+            try:
+                await self.update_role_list_post(guild)
+            except Exception:
+                logger.exception('Failed to update role list after /setplayer')
+
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
     async def setup_hook(self) -> None:
